@@ -110,21 +110,20 @@ void main() {
 	// Compute optimal shuffle mask for the number of subgroups
 	const uint shuffle_mask = (0x70 / gl_NumSubgroups) & 0x70;
 
-
 	const uint linear_ndx = gl_LocalInvocationIndex;
 	const uvec2 group_top_left = gl_WorkGroupID.xy * gl_WorkGroupSize.xy;
-	const uint linear_write_offset = gl_SubgroupInvocationID + gl_SubgroupID * ((16*16) / gl_NumSubgroups);
+	const uint linear_write_offset = gl_SubgroupInvocationID + gl_SubgroupID * ((16 * 16) / gl_NumSubgroups);
 
 // Each subgroup fetches contiguous memory in the 16x16 block
 #pragma unroll
 	for (uint b = 0; b < 4; b++) {
 		// Compute the linear offset of the work item
-		const uint linear_index = linear_write_offset  + (b * gl_SubgroupSize);
+		const uint linear_index = linear_write_offset + (b * gl_SubgroupSize);
 		// Extract (x,y) coordinate of sub block
 		const uint xi = linear_index & 0xf;
 		const uint yi = linear_index >> 4;
 		// Fetch pixel value
-		const vec2 fetch_uv = clamp(vec2(params.section.xy + group_top_left + vec2(xi,yi) - 3.5) / params.section.zw, vec2(0.5 / params.section.zw), vec2(1.0 - 0.5 / params.section.zw));
+		const vec2 fetch_uv = clamp(vec2(params.section.xy + group_top_left + vec2(xi, yi) - 3.5) / params.section.zw, vec2(0.5 / params.section.zw), vec2(1.0 - 0.5 / params.section.zw));
 
 		// Shuffle write index to avoid bank conflicts during horizontal blur pass
 		const uint store_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
@@ -138,7 +137,6 @@ void main() {
 		// Store in shuffled index
 		local_cache[store_index] = color;
 	}
-
 
 #ifdef MODE_GLOW
 #define KERNEL_SIZE 5
@@ -164,7 +162,7 @@ void main() {
 	const uint start_0 = ((linear_start_0 & 0xf8) << 1) + (linear_start_0 & 0x7) + 4;
 
 #pragma unroll
-	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+	for (int k = 1 - KERNEL_SIZE; k < KERNEL_SIZE; k++) {
 		const uint linear_index = start_0 + k;
 		// Shuffle linear index to get stored location
 		const uint read_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
@@ -179,7 +177,7 @@ void main() {
 	const uint start_1 = ((linear_start_1 & 0xf8) << 1) + (linear_start_1 & 0x7) + 4;
 
 #pragma unroll
-	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+	for (int k = 1 - KERNEL_SIZE; k < KERNEL_SIZE; k++) {
 		const uint linear_index = start_1 + k;
 		// Shuffle linear index to get stored location
 		const uint read_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
@@ -205,15 +203,14 @@ void main() {
 	}
 
 	// Vertical pass memory is already contiguous
-	uint index =  gl_LocalInvocationID.x + (gl_LocalInvocationID.y + 4) * 8;
+	uint index = gl_LocalInvocationID.x + (gl_LocalInvocationID.y + 4) * 8;
 	vec4 color = vec4(0.0);
 
 // Compute the vertical pass for the 16x8 elements
 #pragma unroll
-	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
-		color += temp_cache[index + 8*k] * kernel[abs(k)];
+	for (int k = 1 - KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+		color += temp_cache[index + 8 * k] * kernel[abs(k)];
 	}
-
 
 #ifdef MODE_GLOW
 	if (bool(params.flags & FLAG_GLOW_FIRST_PASS)) {
