@@ -4,6 +4,8 @@
 
 #VERSION_DEFINES
 
+#extension GL_KHR_shader_subgroup_basic : enable
+
 #include "../oct_inc.glsl"
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
@@ -95,94 +97,128 @@ void main() {
 
 #ifdef MODE_GAUSSIAN_BLUR
 
-	// First pass copy texture into 16x16 local memory for every 8x8 thread block
-	vec2 quad_center_uv = clamp(vec2(params.section.xy + gl_GlobalInvocationID.xy + gl_LocalInvocationID.xy - 3.5) / params.section.zw, vec2(0.5 / params.section.zw), vec2(1.0 - 1.5 / params.section.zw));
-	uint dest_index = gl_LocalInvocationID.x * 2 + gl_LocalInvocationID.y * 2 * 16;
+#ifdef MODE_GLOW
+	const vec3 tonemap_col = vec3(0.299, 0.587, 0.114) / max(params.glow_luminance_cap, 6.0);
+#endif
 
-	local_cache[dest_index] = textureLod(source_color, quad_center_uv, 0);
-	local_cache[dest_index + 1] = textureLod(source_color, quad_center_uv + vec2(1.0 / params.section.z, 0.0), 0);
-	local_cache[dest_index + 16] = textureLod(source_color, quad_center_uv + vec2(0.0, 1.0 / params.section.w), 0);
-	local_cache[dest_index + 16 + 1] = textureLod(source_color, quad_center_uv + vec2(1.0 / params.section.zw), 0);
+	// First pass copy texture into 16x16 local memory for every 8x8 thread block
+
+	// To avoid bank conflicts, linear index "i" in the 16x16 grid will be placed at
+	// i_write according to the equation:
+	// i_write = i ^ ((i & shuffle_mask) >> 1)
+
+	// Compute optimal shuffle mask for the number of subgroups
+	const uint shuffle_mask = (0x70 / gl_NumSubgroups) & 0x70;
+
+
+	const uint linear_ndx = gl_LocalInvocationIndex;
+	const uvec2 group_top_left = gl_WorkGroupID.xy * gl_WorkGroupSize.xy;
+	const uint linear_write_offset = gl_SubgroupInvocationID + gl_SubgroupID * ((16*16) / gl_NumSubgroups);
+
+	// Each subgroup fetches contiguous memory in the 16x16 block
+	#pragma unroll
+	for (uint b = 0; b < 4; b++) {
+		// Compute the linear offset of the work item
+		const uint linear_index = linear_write_offset  + (b * gl_SubgroupSize);
+		// Extract (x,y) coordinate of sub block
+		const uint xi = linear_index & 0xf;
+		const uint yi = linear_index >> 4;
+		// Fetch pixel value
+		const vec2 fetch_uv = clamp(vec2(params.section.xy + group_top_left + vec2(xi,yi) - 3.5) / params.section.zw, vec2(0.5 / params.section.zw), vec2(1.0 - 0.5 / params.section.zw));
+
+		// Shuffle write index to avoid bank conflicts during horizontal blur pass
+		const uint store_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
+		vec4 color = textureLod(source_color, fetch_uv, 0);
 
 #ifdef MODE_GLOW
-	if (bool(params.flags & FLAG_GLOW_FIRST_PASS)) {
 		// Tonemap initial samples to reduce weight of fireflies: https://graphicrants.blogspot.com/2013/12/tone-mapping.html
-		vec3 tonemap_col = vec3(0.299, 0.587, 0.114) / max(params.glow_luminance_cap, 6.0);
-		local_cache[dest_index] /= 1.0 + dot(local_cache[dest_index].rgb, tonemap_col);
-		local_cache[dest_index + 1] /= 1.0 + dot(local_cache[dest_index + 1].rgb, tonemap_col);
-		local_cache[dest_index + 16] /= 1.0 + dot(local_cache[dest_index + 16].rgb, tonemap_col);
-		local_cache[dest_index + 16 + 1] /= 1.0 + dot(local_cache[dest_index + 16 + 1].rgb, tonemap_col);
+		color = bool(params.flags & FLAG_GLOW_FIRST_PASS) ? color / (1.0 + dot(color.rgb, tonemap_col)) : color;
+#endif // MODE_GLOW
+
+		// Store in shuffled index
+		local_cache[store_index] = color;
 	}
-	const float kernel[5] = { 0.2024, 0.1790, 0.1240, 0.0672, 0.0285 };
+
+
+#ifdef MODE_GLOW
+	#define KERNEL_SIZE 5
+	const float kernel[KERNEL_SIZE] = { 0.2024, 0.1790, 0.1240, 0.0672, 0.0285 };
 #else
 	// Simpler blur uses SIGMA2 for the gaussian kernel for a stronger effect.
-	const float kernel[4] = { 0.214607, 0.189879, 0.131514, 0.071303 };
+	#define KERNEL_SIZE 4
+	const float kernel[KERNEL_SIZE] = { 0.214607, 0.189879, 0.131514, 0.071303 };
 #endif
-	memoryBarrierShared();
-	barrier();
 
-	// Horizontal pass. Needs to copy into 8x16 chunk of local memory so vertical pass has full resolution
-	uint read_index = gl_LocalInvocationID.x + gl_LocalInvocationID.y * 32 + 4;
-	vec4 color_top = vec4(0.0);
-	color_top += local_cache[read_index] * kernel[0];
-	color_top += local_cache[read_index + 1] * kernel[1];
-	color_top += local_cache[read_index + 2] * kernel[2];
-	color_top += local_cache[read_index + 3] * kernel[3];
-	color_top += local_cache[read_index - 1] * kernel[1];
-	color_top += local_cache[read_index - 2] * kernel[2];
-	color_top += local_cache[read_index - 3] * kernel[3];
-#ifdef MODE_GLOW
-	color_top += local_cache[read_index + 4] * kernel[4];
-	color_top += local_cache[read_index - 4] * kernel[4];
-#endif // MODE_GLOW
+	// Only need to wait on horizontal pass if subgroups fetch less than 2 rows
+	if (gl_SubgroupSize < 8) {
+		barrier();
+	} else {
+		subgroupMemoryBarrierShared();
+	}
 
-	vec4 color_bottom = vec4(0.0);
-	color_bottom += local_cache[read_index + 16] * kernel[0];
-	color_bottom += local_cache[read_index + 1 + 16] * kernel[1];
-	color_bottom += local_cache[read_index + 2 + 16] * kernel[2];
-	color_bottom += local_cache[read_index + 3 + 16] * kernel[3];
-	color_bottom += local_cache[read_index - 1 + 16] * kernel[1];
-	color_bottom += local_cache[read_index - 2 + 16] * kernel[2];
-	color_bottom += local_cache[read_index - 3 + 16] * kernel[3];
-#ifdef MODE_GLOW
-	color_bottom += local_cache[read_index + 4 + 16] * kernel[4];
-	color_bottom += local_cache[read_index - 4 + 16] * kernel[4];
-#endif // MODE_GLOW
+	// Linear index of first computed element in output 16x8 temp_cache (all kernels start on "left")
+	const uint linear_start_0 = gl_SubgroupInvocationID + gl_SubgroupID * (2 * gl_SubgroupSize);
 
-	// rotate samples to take advantage of cache coherency
-	uint write_index = gl_LocalInvocationID.y * 2 + gl_LocalInvocationID.x * 16;
+	vec4 color_0 = vec4(0.);
+	// Compute corresponding 16x8 position in the 16x16 local_cache by promoting index at 8-bit
+	const uint start_0 = ((linear_start_0 & 0xf8) << 1) + (linear_start_0 & 0x7) + 4;
 
-	temp_cache[write_index] = color_top;
-	temp_cache[write_index + 1] = color_bottom;
+	#pragma unroll
+	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+		const uint linear_index = start_0 + k;
+		// Shuffle linear index to get stored location
+		const uint read_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
+		// Accumulate horizontal pass
+		color_0 += local_cache[read_index] * kernel[abs(k)];
+	}
 
-	memoryBarrierShared();
-	barrier();
+	// Stride by subgroup size
+	const uint linear_start_1 = linear_start_0 + gl_SubgroupSize;
+	vec4 color_1 = vec4(0.);
+	// Promote 8-bit for second pass
+	const uint start_1 = ((linear_start_1 & 0xf8) << 1) + (linear_start_1 & 0x7) + 4;
+
+	#pragma unroll
+	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+		const uint linear_index = start_1 + k;
+		// Shuffle linear index to get stored location
+		const uint read_index = linear_index ^ ((linear_index & shuffle_mask) >> 1);
+		// Accumulate second horizontal pass
+		color_1 += local_cache[read_index] * kernel[abs(k)];
+	}
+
+	// Store values at linear 16x8 position
+	// Memory is stored and fetched contiguously within subgroups, no risk of bank conflicts
+	temp_cache[linear_start_0] = color_0;
+	temp_cache[linear_start_1] = color_1;
+
+	// Only need to wait on vertical pass if more than 1 subgroup is present
+	if (gl_NumSubgroups > 1) {
+		barrier();
+	} else {
+		subgroupMemoryBarrierShared();
+	}
 
 	// If destination outside of texture, can stop doing work now
 	if (any(greaterThanEqual(pos, params.section.zw))) {
 		return;
 	}
 
-	// Vertical pass
-	uint index = gl_LocalInvocationID.y + gl_LocalInvocationID.x * 16 + 4;
+	// Vertical pass memory is already contiguous
+	uint index =  gl_LocalInvocationID.x + (gl_LocalInvocationID.y + 4) * 8;
 	vec4 color = vec4(0.0);
 
-	color += temp_cache[index] * kernel[0];
-	color += temp_cache[index + 1] * kernel[1];
-	color += temp_cache[index + 2] * kernel[2];
-	color += temp_cache[index + 3] * kernel[3];
-	color += temp_cache[index - 1] * kernel[1];
-	color += temp_cache[index - 2] * kernel[2];
-	color += temp_cache[index - 3] * kernel[3];
-#ifdef MODE_GLOW
-	color += temp_cache[index + 4] * kernel[4];
-	color += temp_cache[index - 4] * kernel[4];
-#endif // MODE_GLOW
+	// Compute the vertical pass for the 16x8 elements
+	#pragma unroll
+	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
+		color += temp_cache[index + 8*k] * kernel[abs(k)];
+	}
+
 
 #ifdef MODE_GLOW
 	if (bool(params.flags & FLAG_GLOW_FIRST_PASS)) {
 		// Undo tonemap to restore range: https://graphicrants.blogspot.com/2013/12/tone-mapping.html
-		color /= 1.0 - dot(color.rgb, vec3(0.299, 0.587, 0.114) / max(params.glow_luminance_cap, 6.0));
+		color /= 1.0 - dot(color.rgb, tonemap_col);
 	}
 
 	color *= params.glow_strength;
