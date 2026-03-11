@@ -115,8 +115,8 @@ void main() {
 	const uvec2 group_top_left = gl_WorkGroupID.xy * gl_WorkGroupSize.xy;
 	const uint linear_write_offset = gl_SubgroupInvocationID + gl_SubgroupID * ((16*16) / gl_NumSubgroups);
 
-	// Each subgroup fetches contiguous memory in the 16x16 block
-	#pragma unroll
+// Each subgroup fetches contiguous memory in the 16x16 block
+#pragma unroll
 	for (uint b = 0; b < 4; b++) {
 		// Compute the linear offset of the work item
 		const uint linear_index = linear_write_offset  + (b * gl_SubgroupSize);
@@ -141,11 +141,11 @@ void main() {
 
 
 #ifdef MODE_GLOW
-	#define KERNEL_SIZE 5
+#define KERNEL_SIZE 5
 	const float kernel[KERNEL_SIZE] = { 0.2024, 0.1790, 0.1240, 0.0672, 0.0285 };
 #else
+#define KERNEL_SIZE 4
 	// Simpler blur uses SIGMA2 for the gaussian kernel for a stronger effect.
-	#define KERNEL_SIZE 4
 	const float kernel[KERNEL_SIZE] = { 0.214607, 0.189879, 0.131514, 0.071303 };
 #endif
 
@@ -163,7 +163,7 @@ void main() {
 	// Compute corresponding 16x8 position in the 16x16 local_cache by promoting index at 8-bit
 	const uint start_0 = ((linear_start_0 & 0xf8) << 1) + (linear_start_0 & 0x7) + 4;
 
-	#pragma unroll
+#pragma unroll
 	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
 		const uint linear_index = start_0 + k;
 		// Shuffle linear index to get stored location
@@ -178,7 +178,7 @@ void main() {
 	// Promote 8-bit for second pass
 	const uint start_1 = ((linear_start_1 & 0xf8) << 1) + (linear_start_1 & 0x7) + 4;
 
-	#pragma unroll
+#pragma unroll
 	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
 		const uint linear_index = start_1 + k;
 		// Shuffle linear index to get stored location
@@ -208,8 +208,8 @@ void main() {
 	uint index =  gl_LocalInvocationID.x + (gl_LocalInvocationID.y + 4) * 8;
 	vec4 color = vec4(0.0);
 
-	// Compute the vertical pass for the 16x8 elements
-	#pragma unroll
+// Compute the vertical pass for the 16x8 elements
+#pragma unroll
 	for (int k = 1-KERNEL_SIZE; k < KERNEL_SIZE; k++) {
 		color += temp_cache[index + 8*k] * kernel[abs(k)];
 	}
