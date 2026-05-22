@@ -181,21 +181,18 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, bokeh.compute_pipelines[mode].get_rid());
 
-		static const int quality_samples[4] = { 6, 12, 12, 24 };
-
+		static const int quality_samples[4] = { 1, 0, 1, 0 };
 		bokeh.push_constant.steps = quality_samples[blur_quality];
+		// quality_samples[blur_quality];
 
 		if (blur_quality == RSE::DOF_BLUR_QUALITY_VERY_LOW || blur_quality == RSE::DOF_BLUR_QUALITY_LOW) {
 			//box and hexagon are more or less the same, and they can work in either half (very low and low quality) or full (medium and high quality_ sizes)
-
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_half_image0), 0);
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 1, u_base_texture), 1);
 
 			bokeh.push_constant.size[0] = p_buffers.base_texture_size.x >> 1;
 			bokeh.push_constant.size[1] = p_buffers.base_texture_size.y >> 1;
-			bokeh.push_constant.half_size = true;
 			bokeh.push_constant.blur_size *= 0.5;
-
 		} else {
 			//medium and high quality use full size
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_secondary_image), 0);
@@ -209,6 +206,11 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 
 		//third pass
 		bokeh.push_constant.second_pass = true;
+
+		// Reduce blur size to account for pixel shear distortion
+		if (bokeh_shape == RSE::DOF_BOKEH_HEXAGON) {
+			bokeh.push_constant.blur_size *= sqrtf(3. / 4.);
+		}
 
 		if (blur_quality == RSE::DOF_BLUR_QUALITY_VERY_LOW || blur_quality == RSE::DOF_BLUR_QUALITY_LOW) {
 			RD::get_singleton()->compute_list_bind_uniform_set(compute_list, uniform_set_cache->get_cache(shader, 0, u_half_image1), 0);
@@ -236,13 +238,12 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 
 			bokeh.push_constant.size[0] = p_buffers.base_texture_size.x;
 			bokeh.push_constant.size[1] = p_buffers.base_texture_size.y;
-			bokeh.push_constant.half_size = false;
-			bokeh.push_constant.second_pass = false;
 
 			RD::get_singleton()->compute_list_set_push_constant(compute_list, &bokeh.push_constant, sizeof(BokehPushConstant));
 
 			RD::get_singleton()->compute_list_dispatch_threads(compute_list, p_buffers.base_texture_size.x, p_buffers.base_texture_size.y, 1);
 		}
+
 	} else {
 		//circle
 
@@ -252,10 +253,10 @@ void BokehDOF::bokeh_dof_compute(const BokehBuffers &p_buffers, RID p_camera_att
 		//second pass
 		RD::get_singleton()->compute_list_bind_compute_pipeline(compute_list, bokeh.compute_pipelines[BOKEH_GEN_BOKEH_CIRCULAR].get_rid());
 
-		static const float quality_scale[4] = { 8.0, 4.0, 1.0, 0.5 };
+		static const int quality_scale[4] = { 3, 2, 1, 0 };
 
-		bokeh.push_constant.steps = 0;
-		bokeh.push_constant.blur_scale = quality_scale[blur_quality];
+		bokeh.push_constant.blur_size *= 0.5;
+		bokeh.push_constant.steps = quality_scale[blur_quality];
 
 		//circle always runs in half size, otherwise too expensive
 
